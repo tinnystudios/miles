@@ -23,7 +23,8 @@
   }
   input, select, textarea, button { font-family: 'DM Sans', sans-serif; }
   input:focus, select:focus, textarea:focus { border-color: #3b82f6 !important; outline: none; }
-  input[type="datetime-local"]::-webkit-calendar-picker-indicator { opacity: 0.5; }
+  input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.5; }
+  input[type="time"]::-webkit-calendar-picker-indicator { opacity: 0.5; }
   @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 </style>
@@ -44,10 +45,11 @@ const APP_KEY = "milelog_v2";
 const load = () => { try { const r = localStorage.getItem(APP_KEY); return r ? JSON.parse(r) : { trips: [], addresses: [] }; } catch { return { trips: [], addresses: [] }; } };
 const save = (d) => localStorage.setItem(APP_KEY, JSON.stringify(d));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-const fmtDate = (iso) => new Date(iso).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-const fmtTime = (iso) => new Date(iso).toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" });
+const fmtDate = (d) => new Date(d).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+const fmtTime = (t) => { if (!t) return ""; const [h,m] = t.split(":"); const hr = parseInt(h); const ampm = hr >= 12 ? "PM" : "AM"; return ((hr % 12) || 12) + ":" + m + " " + ampm; };
 const pad = (n) => String(n).padStart(2, "0");
-const localISO = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 
 const weekNum = (d) => {
   const date = new Date(d); date.setHours(0,0,0,0);
@@ -84,24 +86,24 @@ function AddrSuggestions({ addresses, field, show, onPick }) {
 
 // ─── Trip Form ───
 function TripForm({ addresses, trip, onSave, onCancel }) {
-  const now = new Date();
   const [form, setForm] = useState(trip ? {
     from: trip.from || "", to: trip.to || "",
-    startTime: trip.startTime ? localISO(new Date(trip.startTime)) : localISO(now),
-    endTime: trip.endTime ? localISO(new Date(trip.endTime)) : "",
+    date: trip.date || todayStr(),
+    startTime: trip.startTime || nowTime(),
+    endTime: trip.endTime || "",
     distance: trip.distance || "", vehicle: trip.vehicle || "My Car",
     purpose: trip.purpose || "", notes: trip.notes || ""
-  } : { from: "", to: "", startTime: localISO(now), endTime: "", distance: "", vehicle: "My Car", purpose: "", notes: "" });
+  } : { from: "", to: "", date: todayStr(), startTime: nowTime(), endTime: "", distance: "", vehicle: "My Car", purpose: "", notes: "" });
 
   const [showFrom, setShowFrom] = useState(false);
   const [showTo, setShowTo] = useState(false);
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
-  const valid = form.distance && form.startTime;
+  const valid = form.distance && form.date && form.startTime;
 
   const handleSave = () => {
     if (!valid) return;
-    onSave({ ...(trip || {}), ...form, startTime: new Date(form.startTime).toISOString(), endTime: form.endTime ? new Date(form.endTime).toISOString() : null });
+    onSave({ ...(trip || {}), ...form });
   };
 
   const label = (text) => h("label", { style: { display: "block", fontSize: 13, fontWeight: 600, color: "#475569", marginBottom: 6, letterSpacing: "0.2px" } }, text);
@@ -130,10 +132,15 @@ function TripForm({ addresses, trip, onSave, onCancel }) {
         h(AddrSuggestions, { addresses, show: showTo, onPick: a => { set("to", a.label + " — " + a.address); setShowTo(false); } })
       )
     ),
+    // Date
+    h("div", { style: { marginBottom: 16 } },
+      label("Date *"),
+      input({ type: "date", value: form.date, onChange: e => set("date", e.target.value) })
+    ),
     // Start/End time
     h("div", { style: { display: "flex", gap: 12, marginBottom: 16 } },
-      h("div", { style: { flex: 1 } }, label("Start Time *"), input({ type: "datetime-local", value: form.startTime, onChange: e => set("startTime", e.target.value) })),
-      h("div", { style: { flex: 1 } }, label("End Time"), input({ type: "datetime-local", value: form.endTime, onChange: e => set("endTime", e.target.value) }))
+      h("div", { style: { flex: 1 } }, label("Start Time *"), input({ type: "time", value: form.startTime, onChange: e => set("startTime", e.target.value) })),
+      h("div", { style: { flex: 1 } }, label("End Time"), input({ type: "time", value: form.endTime, onChange: e => set("endTime", e.target.value) }))
     ),
     // Distance / Vehicle
     h("div", { style: { display: "flex", gap: 12, marginBottom: 16 } },
@@ -204,7 +211,7 @@ function App() {
   const filtered = useMemo(() => {
     const now = new Date();
     return data.trips.filter(t => {
-      const d = new Date(t.startTime);
+      const d = new Date(t.date + "T00:00:00");
       if (filter === "week") { const tw = weekNum(now), dw = weekNum(d); return tw.y === dw.y && tw.w === dw.w; }
       if (filter === "month") return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
       if (filter === "year") return d.getFullYear() === now.getFullYear();
@@ -215,14 +222,14 @@ function App() {
   const totalKm = filtered.reduce((s, t) => s + (parseFloat(t.distance) || 0), 0);
   const grouped = useMemo(() => {
     const g = {};
-    filtered.forEach(t => { const k = new Date(t.startTime).toISOString().slice(0, 10); if (!g[k]) g[k] = []; g[k].push(t); });
+    filtered.forEach(t => { const k = t.date; if (!g[k]) g[k] = []; g[k].push(t); });
     return Object.entries(g).sort((a, b) => b[0].localeCompare(a[0]));
   }, [filtered]);
 
   const exportCSV = () => {
     const q = (v) => '"' + String(v||"").replace(/"/g,'""') + '"';
     const hdr = ["Date","Start Time","End Time","From","To","Distance (km)","Vehicle","Purpose","Notes"];
-    const rows = filtered.map(t => [q(fmtDate(t.startTime)), q(fmtTime(t.startTime)), q(t.endTime ? fmtTime(t.endTime) : ""), q(t.from), q(t.to), q(t.distance), q(t.vehicle), q(t.purpose), q(t.notes)]);
+    const rows = filtered.map(t => [q(fmtDate(t.date + "T00:00:00")), q(fmtTime(t.startTime)), q(fmtTime(t.endTime)), q(t.from), q(t.to), q(t.distance), q(t.vehicle), q(t.purpose), q(t.notes)]);
     const csv = [hdr.join(","), ...rows.map(r => r.join(","))].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -232,7 +239,7 @@ function App() {
 
   return h("div", { style: { maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: "#f1f5f9", position: "relative" } },
     // Header
-    h("header", { style: { background: "linear-gradient(145deg, #0f172a 0%, #1e3a5f 100%)", padding: "20px 20px 16px", color: "#fff", position: "sticky", top: 0, zIndex: 100 } },
+    h("header", { style: { background: "linear-gradient(145deg, #0f172a 0%, #1e3a5f 100%)", padding: "20px 20px 16px", paddingTop: "max(20px, env(safe-area-inset-top, 20px))", color: "#fff", position: "sticky", top: 0, zIndex: 100 } },
       h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 } },
         h("div", null,
           h("h1", { style: { fontSize: 26, fontWeight: 700, letterSpacing: "-0.5px", margin: 0, lineHeight: 1 } }, "MileLog"),
@@ -270,7 +277,7 @@ function App() {
             )
           : grouped.map(([date, trips]) =>
               h("div", { key: date, style: { marginBottom: 16, animation: "slideUp 0.3s ease" } },
-                h("div", { style: { fontSize: 13, fontWeight: 600, color: "#64748b", padding: "8px 4px 6px", letterSpacing: "0.3px" } }, fmtDate(trips[0].startTime)),
+                h("div", { style: { fontSize: 13, fontWeight: 600, color: "#64748b", padding: "8px 4px 6px", letterSpacing: "0.3px" } }, fmtDate(trips[0].date + "T00:00:00")),
                 trips.map(trip =>
                   h("div", { key: trip.id, style: { background: "#fff", borderRadius: 14, marginBottom: 8, overflow: "hidden", boxShadow: "0 1px 3px rgba(0,0,0,0.06)" } },
                     h("div", { onClick: () => setExpanded(expanded === trip.id ? null : trip.id), style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", cursor: "pointer" } },
