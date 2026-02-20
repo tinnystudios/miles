@@ -1,4 +1,4 @@
-const CACHE_NAME = 'milelog-v1';
+const CACHE_NAME = 'milelog-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -24,16 +24,32 @@ self.addEventListener('activate', (e) => {
   self.clients.claim();
 });
 
+// Network-first for HTML (so updates come through), cache-first for static assets
 self.addEventListener('fetch', (e) => {
-  e.respondWith(
-    caches.match(e.request).then((cached) => {
-      return cached || fetch(e.request).then((response) => {
-        if (response.status === 200) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
-        }
+  const url = new URL(e.request.url);
+  const isPage = e.request.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname.endsWith('/');
+
+  if (isPage) {
+    // Network first for pages - always try to get the fresh version
+    e.respondWith(
+      fetch(e.request).then((response) => {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
         return response;
-      });
-    }).catch(() => caches.match('./index.html'))
-  );
+      }).catch(() => caches.match(e.request).then((cached) => cached || caches.match('./index.html')))
+    );
+  } else {
+    // Cache first for static assets (JS libs, fonts, icons)
+    e.respondWith(
+      caches.match(e.request).then((cached) => {
+        return cached || fetch(e.request).then((response) => {
+          if (response.status === 200) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
+          }
+          return response;
+        });
+      }).catch(() => caches.match('./index.html'))
+    );
+  }
 });
