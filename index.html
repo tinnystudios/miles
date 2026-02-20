@@ -15,18 +15,19 @@
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@500&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
   html, body, #root { height: 100%; }
-  body {
-    font-family: 'DM Sans', sans-serif;
-    background: #f1f5f9;
-    overscroll-behavior: none;
-    -webkit-font-smoothing: antialiased;
-  }
+  body { font-family: 'DM Sans', sans-serif; background: #f1f5f9; overscroll-behavior: none; -webkit-font-smoothing: antialiased; }
   input, select, textarea, button { font-family: 'DM Sans', sans-serif; }
   input:focus, select:focus, textarea:focus { border-color: #3b82f6 !important; outline: none; }
-  input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.5; }
+  input[type="date"]::-webkit-calendar-picker-indicator,
   input[type="time"]::-webkit-calendar-picker-indicator { opacity: 0.5; }
   @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .pac-container { border-radius: 12px !important; border: 1px solid #e2e8f0 !important; box-shadow: 0 8px 24px rgba(0,0,0,0.12) !important; margin-top: 4px !important; font-family: 'DM Sans', sans-serif !important; z-index: 9999 !important; }
+  .pac-item { padding: 8px 14px !important; font-size: 14px !important; cursor: pointer !important; }
+  .pac-item:hover { background: #f1f5f9 !important; }
+  .pac-icon { display: none !important; }
+  .pac-item-query { font-weight: 600 !important; font-size: 14px !important; }
 </style>
 </head>
 <body>
@@ -34,131 +35,284 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script>
-// Register service worker for PWA install + offline
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
-}
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
-const { useState, useEffect, useMemo, createElement: h } = React;
+const { useState, useEffect, useMemo, useRef, useCallback, createElement: h } = React;
 
-const APP_KEY = "milelog_v2";
-const load = () => { try { const r = localStorage.getItem(APP_KEY); return r ? JSON.parse(r) : { trips: [], addresses: [] }; } catch { return { trips: [], addresses: [] }; } };
-const save = (d) => localStorage.setItem(APP_KEY, JSON.stringify(d));
+// ─── Storage ───
+const APP_KEY = "milelog_v3";
+const PREFS_KEY = "milelog_prefs";
+const defaultPrefs = { timeMode: "startend", useGoogleMaps: false, googleApiKey: "" };
+const loadData = () => { try { const r = localStorage.getItem(APP_KEY); return r ? JSON.parse(r) : { trips: [], addresses: [] }; } catch { return { trips: [], addresses: [] }; } };
+const saveData = (d) => localStorage.setItem(APP_KEY, JSON.stringify(d));
+const loadPrefs = () => { try { const r = localStorage.getItem(PREFS_KEY); return r ? { ...defaultPrefs, ...JSON.parse(r) } : defaultPrefs; } catch { return defaultPrefs; } };
+const savePrefs = (p) => localStorage.setItem(PREFS_KEY, JSON.stringify(p));
+
+// ─── Helpers ───
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const fmtDate = (d) => new Date(d).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-const fmtTime = (t) => { if (!t) return ""; const [h,m] = t.split(":"); const hr = parseInt(h); const ampm = hr >= 12 ? "PM" : "AM"; return ((hr % 12) || 12) + ":" + m + " " + ampm; };
+const fmtTime = (t) => { if (!t) return ""; const [hr,m] = t.split(":"); const h = parseInt(hr); return ((h % 12) || 12) + ":" + m + " " + (h >= 12 ? "PM" : "AM"); };
+const fmtDuration = (d) => { if (!d) return ""; const [hr,m] = d.split(":"); return (parseInt(hr) ? parseInt(hr) + "h " : "") + parseInt(m) + "m"; };
 const pad = (n) => String(n).padStart(2, "0");
 const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
 const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-
-const weekNum = (d) => {
-  const date = new Date(d); date.setHours(0,0,0,0);
-  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
-  const w1 = new Date(date.getFullYear(), 0, 4);
-  return { y: date.getFullYear(), w: 1 + Math.round(((date - w1) / 864e5 - 3 + ((w1.getDay() + 6) % 7)) / 7) };
-};
-
+const weekNum = (d) => { const date = new Date(d); date.setHours(0,0,0,0); date.setDate(date.getDate()+3-((date.getDay()+6)%7)); const w1 = new Date(date.getFullYear(),0,4); return { y: date.getFullYear(), w: 1+Math.round(((date-w1)/864e5-3+((w1.getDay()+6)%7))/7) }; };
 const vehicles = ["My Car", "Hospital Car", "Other"];
 
-// SVG icons
-const Icon = (paths, vb = "0 0 24 24") => (props) => h("svg", { width: props?.s || 18, height: props?.s || 18, viewBox: vb, fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", style: props?.style }, ...paths.map(p => typeof p === "string" ? h("path", { d: p }) : p));
+// ─── Google Maps loader ───
+let gMapsLoaded = false;
+let gMapsLoading = false;
+let gMapsCallbacks = [];
+function loadGoogleMaps(apiKey, cb) {
+  if (gMapsLoaded && window.google?.maps?.places) { cb(); return; }
+  gMapsCallbacks.push(cb);
+  if (gMapsLoading) return;
+  gMapsLoading = true;
+  // Remove old script if key changed
+  const old = document.getElementById('gmaps-script');
+  if (old) old.remove();
+  window.__gmapsReady = () => { gMapsLoaded = true; gMapsLoading = false; gMapsCallbacks.forEach(c => c()); gMapsCallbacks = []; };
+  const s = document.createElement('script');
+  s.id = 'gmaps-script';
+  s.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&callback=__gmapsReady`;
+  s.async = true;
+  s.onerror = () => { gMapsLoading = false; gMapsCallbacks = []; };
+  document.head.appendChild(s);
+}
 
-const IconPlus = Icon([h("line", { x1: 12, y1: 5, x2: 12, y2: 19, strokeWidth: 2.5 }), h("line", { x1: 5, y1: 12, x2: 19, y2: 12, strokeWidth: 2.5 })]);
-const IconDL = Icon(["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", h("polyline", { points: "7 10 12 15 17 10" }), h("line", { x1: 12, y1: 15, x2: 12, y2: 3 })]);
-const IconTrash = Icon([h("polyline", { points: "3 6 5 6 21 6" }), "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6", "M10 11v6", "M14 11v6", "M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"]);
-const IconEdit = Icon(["M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7", "M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"]);
-const IconBookmark = Icon(["M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"]);
-const IconMap = Icon(["M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z", h("circle", { cx: 12, cy: 10, r: 3 })]);
-const IconX = Icon([h("line", { x1: 18, y1: 6, x2: 6, y2: 18, strokeWidth: 2.5 }), h("line", { x1: 6, y1: 6, x2: 18, y2: 18, strokeWidth: 2.5 })]);
-const IconCar = Icon(["M5 17h14v-5l-2-6H7L5 12v5z", h("circle", { cx: 7.5, cy: 17, r: 2 }), h("circle", { cx: 16.5, cy: 17, r: 2 })]);
-const IconChev = (props) => h("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", style: { transform: props.up ? "rotate(180deg)" : "none", transition: "transform 0.2s" } }, h("polyline", { points: "6 9 12 15 18 9" }));
+// ─── SVG Icons ───
+const Ic = (paths) => (props) => h("svg", { width: props?.s||18, height: props?.s||18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", style: props?.style }, ...paths.map(p => typeof p === "string" ? h("path", { d: p }) : p));
+const IconPlus = Ic([h("line",{x1:12,y1:5,x2:12,y2:19,strokeWidth:2.5}), h("line",{x1:5,y1:12,x2:19,y2:12,strokeWidth:2.5})]);
+const IconDL = Ic(["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", h("polyline",{points:"7 10 12 15 17 10"}), h("line",{x1:12,y1:15,x2:12,y2:3})]);
+const IconTrash = Ic([h("polyline",{points:"3 6 5 6 21 6"}), "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6", "M10 11v6", "M14 11v6", "M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"]);
+const IconEdit = Ic(["M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7", "M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"]);
+const IconBookmark = Ic(["M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"]);
+const IconMap = Ic(["M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z", h("circle",{cx:12,cy:10,r:3})]);
+const IconX = Ic([h("line",{x1:18,y1:6,x2:6,y2:18,strokeWidth:2.5}), h("line",{x1:6,y1:6,x2:18,y2:18,strokeWidth:2.5})]);
+const IconCar = Ic(["M5 17h14v-5l-2-6H7L5 12v5z", h("circle",{cx:7.5,cy:17,r:2}), h("circle",{cx:16.5,cy:17,r:2})]);
+const IconSettings = Ic(["M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z", h("circle",{cx:12,cy:12,r:3})]);
+const IconRoute = Ic(["M3 17l4-4 4 4 4-4 4 4", h("line",{x1:3,y1:7,x2:21,y2:7})]);
+const IconChev = (props) => h("svg", { width:16, height:16, viewBox:"0 0 24 24", fill:"none", stroke:"currentColor", strokeWidth:2, strokeLinecap:"round", strokeLinejoin:"round", style:{ transform: props.up?"rotate(180deg)":"none", transition:"transform 0.2s" } }, h("polyline",{points:"6 9 12 15 18 9"}));
 
-// ─── Address Suggestions ───
-function AddrSuggestions({ addresses, field, show, onPick }) {
+// ─── Shared styles ───
+const S = {
+  label: { display:"block", fontSize:13, fontWeight:600, color:"#475569", marginBottom:6, letterSpacing:"0.2px" },
+  input: { width:"100%", padding:"12px 14px", background:"#fff", border:"1.5px solid #e2e8f0", borderRadius:12, fontSize:15, color:"#0f172a" },
+  section: { marginBottom: 16 },
+  row: { display:"flex", gap:12, marginBottom:16 },
+  btn: { width:"100%", padding:"14px", background:"linear-gradient(145deg,#3b82f6,#2563eb)", border:"none", borderRadius:14, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", transition:"opacity 0.15s" },
+  closeBtn: { background:"#f1f5f9", border:"none", borderRadius:10, width:36, height:36, display:"flex", alignItems:"center", justifyContent:"center", color:"#64748b", cursor:"pointer" },
+  card: { background:"#fff", borderRadius:14, marginBottom:8, overflow:"hidden", boxShadow:"0 1px 3px rgba(0,0,0,0.06)" },
+  actionBtn: { background:"none", border:"none", padding:"6px 10px", fontSize:13, fontWeight:600, cursor:"pointer", display:"flex", alignItems:"center", gap:5, borderRadius:8 },
+  formHeader: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 },
+  formTitle: { fontSize:22, fontWeight:700, color:"#0f172a" },
+};
+
+// ─── Google Autocomplete Input ───
+function PlaceInput({ value, onChange, onPlaceSelect, placeholder, googleReady, rightIcon }) {
+  const inputRef = useRef(null);
+  const acRef = useRef(null);
+
+  useEffect(() => {
+    if (!googleReady || !inputRef.current || acRef.current) return;
+    const ac = new google.maps.places.Autocomplete(inputRef.current, {
+      types: ['geocode', 'establishment'],
+      componentRestrictions: { country: 'au' },
+      fields: ['formatted_address', 'geometry', 'name']
+    });
+    ac.addListener('place_changed', () => {
+      const place = ac.getPlace();
+      if (place?.formatted_address) {
+        const label = place.name && !place.formatted_address.startsWith(place.name) ? place.name + ', ' + place.formatted_address : place.formatted_address;
+        onChange(label);
+        if (onPlaceSelect) onPlaceSelect(place);
+      }
+    });
+    acRef.current = ac;
+  }, [googleReady]);
+
+  return h("div", { style: { position: "relative" } },
+    h("input", { ref: inputRef, value, onChange: e => onChange(e.target.value), placeholder, style: { ...S.input, paddingRight: rightIcon ? 40 : 14 } }),
+    rightIcon
+  );
+}
+
+// ─── Saved Address Suggestions (shown when Google is OFF or alongside) ───
+function AddrSuggestions({ addresses, show, onPick }) {
   if (!show || !addresses.length) return null;
-  return h("div", { style: { position: "absolute", top: "100%", left: 0, right: 0, background: "#fff", borderRadius: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", zIndex: 50, maxHeight: 200, overflowY: "auto", marginTop: 4, border: "1px solid #e2e8f0" } },
-    addresses.map(a => h("button", { key: a.id, onClick: () => onPick(a), style: { display: "flex", flexDirection: "column", width: "100%", padding: "10px 14px", background: "none", border: "none", borderBottom: "1px solid #f1f5f9", textAlign: "left", cursor: "pointer", gap: 2 } },
-      h("span", { style: { fontWeight: 600, color: "#1e293b", fontSize: 14 } }, a.label),
-      h("span", { style: { fontSize: 12, color: "#64748b" } }, a.address)
+  return h("div", { style: { position:"absolute", top:"100%", left:0, right:0, background:"#fff", borderRadius:12, boxShadow:"0 8px 24px rgba(0,0,0,0.12)", zIndex:50, maxHeight:200, overflowY:"auto", marginTop:4, border:"1px solid #e2e8f0" } },
+    addresses.map(a => h("button", { key:a.id, onClick:()=>onPick(a), style:{ display:"flex", flexDirection:"column", width:"100%", padding:"10px 14px", background:"none", border:"none", borderBottom:"1px solid #f1f5f9", textAlign:"left", cursor:"pointer", gap:2 } },
+      h("span", { style:{ fontWeight:600, color:"#1e293b", fontSize:14 } }, a.label),
+      h("span", { style:{ fontSize:12, color:"#64748b" } }, a.address)
     ))
   );
 }
 
 // ─── Trip Form ───
-function TripForm({ addresses, trip, onSave, onCancel }) {
+function TripForm({ addresses, trip, onSave, onCancel, prefs }) {
   const [form, setForm] = useState(trip ? {
-    from: trip.from || "", to: trip.to || "",
-    date: trip.date || todayStr(),
-    startTime: trip.startTime || nowTime(),
-    endTime: trip.endTime || "",
-    distance: trip.distance || "", vehicle: trip.vehicle || "My Car",
-    purpose: trip.purpose || "", notes: trip.notes || ""
-  } : { from: "", to: "", date: todayStr(), startTime: nowTime(), endTime: "", distance: "", vehicle: "My Car", purpose: "", notes: "" });
+    from: trip.from||"", to: trip.to||"", date: trip.date||todayStr(),
+    startTime: trip.startTime||nowTime(), endTime: trip.endTime||"",
+    duration: trip.duration||"", distance: trip.distance||"",
+    vehicle: trip.vehicle||"My Car", purpose: trip.purpose||"", notes: trip.notes||""
+  } : { from:"", to:"", date:todayStr(), startTime:nowTime(), endTime:"", duration:"", distance:"", vehicle:"My Car", purpose:"", notes:"" });
 
-  const [showFrom, setShowFrom] = useState(false);
-  const [showTo, setShowTo] = useState(false);
+  const [showFromSaved, setShowFromSaved] = useState(false);
+  const [showToSaved, setShowToSaved] = useState(false);
+  const [fromPlace, setFromPlace] = useState(null);
+  const [toPlace, setToPlace] = useState(null);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeError, setRouteError] = useState("");
+  const [googleReady, setGoogleReady] = useState(false);
+
+  const useGoogle = prefs.useGoogleMaps && prefs.googleApiKey;
+
+  useEffect(() => {
+    if (useGoogle) {
+      loadGoogleMaps(prefs.googleApiKey, () => setGoogleReady(true));
+    }
+  }, [useGoogle, prefs.googleApiKey]);
 
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
-  const valid = form.distance && form.date && form.startTime;
+  const isDuration = prefs.timeMode === "duration";
+  const valid = form.distance && form.date && (isDuration ? form.duration : form.startTime);
 
   const handleSave = () => {
     if (!valid) return;
-    onSave({ ...(trip || {}), ...form });
+    onSave({ ...(trip||{}), ...form });
   };
 
-  const label = (text) => h("label", { style: { display: "block", fontSize: 13, fontWeight: 600, color: "#475569", marginBottom: 6, letterSpacing: "0.2px" } }, text);
-  const input = (props) => h("input", { style: { width: "100%", padding: "12px 14px", background: "#fff", border: "1.5px solid #e2e8f0", borderRadius: 12, fontSize: 15, color: "#0f172a" }, ...props });
+  // Calculate route via Google Directions
+  const calcRoute = () => {
+    if (!fromPlace?.geometry && !form.from) return;
+    if (!toPlace?.geometry && !form.to) return;
+    setRouteLoading(true);
+    setRouteError("");
+    const svc = new google.maps.DirectionsService();
+    svc.route({
+      origin: fromPlace?.geometry?.location || form.from,
+      destination: toPlace?.geometry?.location || form.to,
+      travelMode: google.maps.TravelMode.DRIVING,
+    }, (result, status) => {
+      setRouteLoading(false);
+      if (status === "OK" && result.routes[0]?.legs[0]) {
+        const leg = result.routes[0].legs[0];
+        const km = (leg.distance.value / 1000).toFixed(1);
+        const mins = Math.round(leg.duration.value / 60);
+        const hrs = Math.floor(mins / 60);
+        const m = mins % 60;
+        set("distance", km);
+        if (isDuration) {
+          set("duration", pad(hrs) + ":" + pad(m));
+        } else {
+          // Calculate end time from start + duration
+          if (form.startTime) {
+            const [sh, sm] = form.startTime.split(":").map(Number);
+            const totalMin = sh * 60 + sm + mins;
+            set("endTime", pad(Math.floor(totalMin / 60) % 24) + ":" + pad(totalMin % 60));
+          }
+        }
+      } else {
+        setRouteError("Could not calculate route. You can still enter manually.");
+      }
+    });
+  };
 
-  return h("div", { style: { animation: "slideUp 0.25s ease", paddingBottom: 40 } },
-    h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 } },
-      h("h2", { style: { fontSize: 22, fontWeight: 700, color: "#0f172a" } }, trip ? "Edit Trip" : "New Trip"),
-      h("button", { onClick: onCancel, style: { background: "#f1f5f9", border: "none", borderRadius: 10, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", color: "#64748b", cursor: "pointer" } }, h(IconX))
+  const label = (text) => h("label", { style: S.label }, text);
+  const input = (props) => h("input", { style: S.input, ...props });
+
+  const bookmarkBtn = (onClick) => h("button", { onClick, style:{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:"#94a3b8", cursor:"pointer", padding:4, zIndex:5 } }, h(IconBookmark));
+
+  // From field
+  const fromField = h("div", { style: S.section },
+    label("From"),
+    h("div", { style:{ position:"relative" } },
+      useGoogle && googleReady
+        ? h(PlaceInput, {
+            value: form.from,
+            onChange: v => set("from", v),
+            onPlaceSelect: p => { setFromPlace(p); setRouteError(""); },
+            placeholder: "Start location",
+            googleReady,
+            rightIcon: addresses.length > 0 && bookmarkBtn(() => setShowFromSaved(!showFromSaved))
+          })
+        : h(React.Fragment, null,
+            input({ value:form.from, onChange:e=>set("from",e.target.value), onFocus:()=>setShowFromSaved(true), onBlur:()=>setTimeout(()=>setShowFromSaved(false),200), placeholder:"Start location" }),
+            addresses.length > 0 && bookmarkBtn(() => setShowFromSaved(!showFromSaved))
+          ),
+      h(AddrSuggestions, { addresses, show: showFromSaved, onPick: a => { set("from", a.label+" — "+a.address); setShowFromSaved(false); } })
+    )
+  );
+
+  // To field
+  const toField = h("div", { style: S.section },
+    label("To"),
+    h("div", { style:{ position:"relative" } },
+      useGoogle && googleReady
+        ? h(PlaceInput, {
+            value: form.to,
+            onChange: v => set("to", v),
+            onPlaceSelect: p => { setToPlace(p); setRouteError(""); },
+            placeholder: "Destination",
+            googleReady,
+            rightIcon: addresses.length > 0 && bookmarkBtn(() => setShowToSaved(!showToSaved))
+          })
+        : h(React.Fragment, null,
+            input({ value:form.to, onChange:e=>set("to",e.target.value), onFocus:()=>setShowToSaved(true), onBlur:()=>setTimeout(()=>setShowToSaved(false),200), placeholder:"Destination" }),
+            addresses.length > 0 && bookmarkBtn(() => setShowToSaved(!showToSaved))
+          ),
+      h(AddrSuggestions, { addresses, show: showToSaved, onPick: a => { set("to", a.label+" — "+a.address); setShowToSaved(false); } })
+    )
+  );
+
+  // Calculate route button
+  const routeBtn = useGoogle && googleReady && form.from && form.to && h("div", { style: { marginBottom: 16 } },
+    h("button", { onClick: calcRoute, disabled: routeLoading, style: { ...S.btn, background: routeLoading ? "#94a3b8" : "linear-gradient(145deg,#10b981,#059669)", display:"flex", alignItems:"center", justifyContent:"center", gap:8, padding:"12px" } },
+      routeLoading
+        ? h("span", { style:{ width:16, height:16, border:"2px solid rgba(255,255,255,0.3)", borderTopColor:"#fff", borderRadius:"50%", animation:"spin 0.6s linear infinite", display:"inline-block" } })
+        : h(IconRoute, { s:16 }),
+      routeLoading ? " Calculating..." : " Calculate Route"
     ),
-    // From
-    h("div", { style: { marginBottom: 16 } },
-      label("From"),
-      h("div", { style: { position: "relative" } },
-        input({ value: form.from, onChange: e => set("from", e.target.value), onFocus: () => setShowFrom(true), onBlur: () => setTimeout(() => setShowFrom(false), 200), placeholder: "Start location" }),
-        addresses.length > 0 && h("button", { onClick: () => setShowFrom(!showFrom), style: { position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#94a3b8", cursor: "pointer", padding: 4 } }, h(IconBookmark)),
-        h(AddrSuggestions, { addresses, show: showFrom, onPick: a => { set("from", a.label + " — " + a.address); setShowFrom(false); } })
+    routeError && h("p", { style:{ fontSize:13, color:"#f59e0b", marginTop:6 } }, routeError)
+  );
+
+  // Time section — depends on mode
+  const timeSection = isDuration
+    ? h("div", { style: S.section },
+        label("Total Duration (H:MM) *"),
+        input({ value: form.duration, onChange: e => set("duration", e.target.value), placeholder: "1:15", inputMode:"text" })
       )
+    : h("div", { style: S.row },
+        h("div", { style:{flex:1} }, label("Start Time *"), input({ type:"time", value:form.startTime, onChange:e=>set("startTime",e.target.value) })),
+        h("div", { style:{flex:1} }, label("End Time"), input({ type:"time", value:form.endTime, onChange:e=>set("endTime",e.target.value) }))
+      );
+
+  return h("div", { style:{ animation:"slideUp 0.25s ease", paddingBottom:40 } },
+    h("div", { style:S.formHeader },
+      h("h2", { style:S.formTitle }, trip ? "Edit Trip" : "New Trip"),
+      h("button", { onClick:onCancel, style:S.closeBtn }, h(IconX))
     ),
-    // To
-    h("div", { style: { marginBottom: 16 } },
-      label("To"),
-      h("div", { style: { position: "relative" } },
-        input({ value: form.to, onChange: e => set("to", e.target.value), onFocus: () => setShowTo(true), onBlur: () => setTimeout(() => setShowTo(false), 200), placeholder: "Destination" }),
-        addresses.length > 0 && h("button", { onClick: () => setShowTo(!showTo), style: { position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#94a3b8", cursor: "pointer", padding: 4 } }, h(IconBookmark)),
-        h(AddrSuggestions, { addresses, show: showTo, onPick: a => { set("to", a.label + " — " + a.address); setShowTo(false); } })
-      )
-    ),
+    fromField,
+    toField,
+    routeBtn,
     // Date
-    h("div", { style: { marginBottom: 16 } },
-      label("Date *"),
-      input({ type: "date", value: form.date, onChange: e => set("date", e.target.value) })
-    ),
-    // Start/End time
-    h("div", { style: { display: "flex", gap: 12, marginBottom: 16 } },
-      h("div", { style: { flex: 1 } }, label("Start Time *"), input({ type: "time", value: form.startTime, onChange: e => set("startTime", e.target.value) })),
-      h("div", { style: { flex: 1 } }, label("End Time"), input({ type: "time", value: form.endTime, onChange: e => set("endTime", e.target.value) }))
-    ),
+    h("div", { style:S.section }, label("Date *"), input({ type:"date", value:form.date, onChange:e=>set("date",e.target.value) })),
+    timeSection,
     // Distance / Vehicle
-    h("div", { style: { display: "flex", gap: 12, marginBottom: 16 } },
-      h("div", { style: { flex: 1 } }, label("Distance (km) *"), input({ type: "number", inputMode: "decimal", step: "0.1", value: form.distance, onChange: e => set("distance", e.target.value), placeholder: "0.0" })),
-      h("div", { style: { flex: 1 } }, label("Vehicle"),
-        h("select", { value: form.vehicle, onChange: e => set("vehicle", e.target.value), style: { width: "100%", padding: "12px 14px", background: "#fff", border: "1.5px solid #e2e8f0", borderRadius: 12, fontSize: 15, color: "#0f172a" } },
-          vehicles.map(v => h("option", { key: v, value: v }, v))
-        )
+    h("div", { style:S.row },
+      h("div", { style:{flex:1} }, label("Distance (km) *"), input({ type:"number", inputMode:"decimal", step:"0.1", value:form.distance, onChange:e=>set("distance",e.target.value), placeholder:"0.0" })),
+      h("div", { style:{flex:1} }, label("Vehicle"),
+        h("select", { value:form.vehicle, onChange:e=>set("vehicle",e.target.value), style:S.input }, vehicles.map(v => h("option",{key:v,value:v},v)))
       )
     ),
     // Purpose
-    h("div", { style: { marginBottom: 16 } }, label("Purpose"), input({ value: form.purpose, onChange: e => set("purpose", e.target.value), placeholder: "e.g. Home visit, patient consult" })),
+    h("div", { style:S.section }, label("Purpose"), input({ value:form.purpose, onChange:e=>set("purpose",e.target.value), placeholder:"e.g. Home visit, patient consult" })),
     // Notes
-    h("div", { style: { marginBottom: 16 } }, label("Notes"),
-      h("textarea", { value: form.notes, onChange: e => set("notes", e.target.value), placeholder: "Optional notes...", style: { width: "100%", padding: "12px 14px", background: "#fff", border: "1.5px solid #e2e8f0", borderRadius: 12, fontSize: 15, color: "#0f172a", minHeight: 60, resize: "vertical", fontFamily: "inherit" } })
+    h("div", { style:S.section }, label("Notes"),
+      h("textarea", { value:form.notes, onChange:e=>set("notes",e.target.value), placeholder:"Optional notes...", style:{ ...S.input, minHeight:60, resize:"vertical", fontFamily:"inherit" } })
     ),
     // Save
-    h("button", { onClick: handleSave, disabled: !valid, style: { width: "100%", padding: "14px", background: "linear-gradient(145deg, #3b82f6, #2563eb)", border: "none", borderRadius: 14, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", marginTop: 8, opacity: valid ? 1 : 0.5, transition: "opacity 0.15s" } }, trip ? "Update Trip" : "Save Trip")
+    h("button", { onClick:handleSave, disabled:!valid, style:{ ...S.btn, marginTop:8, opacity: valid?1:0.5 } }, trip ? "Update Trip" : "Save Trip")
   );
 }
 
@@ -166,171 +320,291 @@ function TripForm({ addresses, trip, onSave, onCancel }) {
 function AddressManager({ addresses, onAdd, onRemove, onClose }) {
   const [label, setLabel] = useState("");
   const [address, setAddress] = useState("");
-  const handleAdd = () => { if (!label.trim() || !address.trim()) return; onAdd({ label: label.trim(), address: address.trim() }); setLabel(""); setAddress(""); };
-  const lbl = (text) => h("label", { style: { display: "block", fontSize: 13, fontWeight: 600, color: "#475569", marginBottom: 6 } }, text);
-  const inp = (props) => h("input", { style: { width: "100%", padding: "12px 14px", background: "#fff", border: "1.5px solid #e2e8f0", borderRadius: 12, fontSize: 15, color: "#0f172a" }, ...props });
-
-  return h("div", { style: { animation: "slideUp 0.25s ease", paddingBottom: 40 } },
-    h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
-      h("h2", { style: { fontSize: 22, fontWeight: 700, color: "#0f172a" } }, "Saved Addresses"),
-      h("button", { onClick: onClose, style: { background: "#f1f5f9", border: "none", borderRadius: 10, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", color: "#64748b", cursor: "pointer" } }, h(IconX))
+  const handleAdd = () => { if(!label.trim()||!address.trim()) return; onAdd({ label:label.trim(), address:address.trim() }); setLabel(""); setAddress(""); };
+  const lbl = (t) => h("label",{style:S.label},t);
+  const inp = (props) => h("input",{style:S.input,...props});
+  return h("div", { style:{ animation:"slideUp 0.25s ease", paddingBottom:40 } },
+    h("div", { style:S.formHeader },
+      h("h2", { style:S.formTitle }, "Saved Addresses"),
+      h("button", { onClick:onClose, style:S.closeBtn }, h(IconX))
     ),
-    h("p", { style: { fontSize: 14, color: "#64748b", margin: "0 0 20px" } }, "Save frequently visited locations for quick entry."),
-    h("div", { style: { marginBottom: 16 } }, lbl("Label"), inp({ value: label, onChange: e => setLabel(e.target.value), placeholder: "e.g. Royal Melbourne Hospital" })),
-    h("div", { style: { marginBottom: 16 } }, lbl("Address"), inp({ value: address, onChange: e => setAddress(e.target.value), placeholder: "e.g. 300 Grattan St, Parkville VIC 3050" })),
-    h("button", { onClick: handleAdd, disabled: !label || !address, style: { width: "100%", padding: "14px", background: "linear-gradient(145deg, #3b82f6, #2563eb)", border: "none", borderRadius: 14, color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", marginBottom: 28, opacity: label && address ? 1 : 0.5 } }, "Add Address"),
+    h("p", { style:{ fontSize:14, color:"#64748b", margin:"0 0 20px" } }, "Save frequently visited locations for quick entry."),
+    h("div", { style:S.section }, lbl("Label"), inp({ value:label, onChange:e=>setLabel(e.target.value), placeholder:"e.g. Royal Melbourne Hospital" })),
+    h("div", { style:S.section }, lbl("Address"), inp({ value:address, onChange:e=>setAddress(e.target.value), placeholder:"e.g. 300 Grattan St, Parkville VIC 3050" })),
+    h("button", { onClick:handleAdd, disabled:!label||!address, style:{ ...S.btn, marginBottom:28, opacity:label&&address?1:0.5 } }, "Add Address"),
     addresses.length === 0
-      ? h("div", { style: { textAlign: "center", padding: "40px 20px", color: "#94a3b8" } }, h(IconMap), h("p", { style: { marginTop: 12, fontSize: 14 } }, "No saved addresses yet"))
-      : addresses.map(a => h("div", { key: a.id, style: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", borderRadius: 12, padding: "14px 16px", marginBottom: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.06)" } },
+      ? h("div", { style:{ textAlign:"center", padding:"40px 20px", color:"#94a3b8" } }, h(IconMap), h("p",{style:{marginTop:12,fontSize:14}},"No saved addresses yet"))
+      : addresses.map(a => h("div", { key:a.id, style:{ display:"flex", justifyContent:"space-between", alignItems:"center", ...S.card, padding:"14px 16px" } },
           h("div", null,
-            h("div", { style: { fontWeight: 600, color: "#1e293b", fontSize: 15 } }, a.label),
-            h("div", { style: { color: "#64748b", fontSize: 13, marginTop: 2 } }, a.address)
+            h("div", { style:{ fontWeight:600, color:"#1e293b", fontSize:15 } }, a.label),
+            h("div", { style:{ color:"#64748b", fontSize:13, marginTop:2 } }, a.address)
           ),
-          h("button", { onClick: () => onRemove(a.id), style: { background: "none", border: "none", padding: "6px 10px", color: "#ef4444", cursor: "pointer", flexShrink: 0 } }, h(IconTrash))
+          h("button", { onClick:()=>onRemove(a.id), style:{ ...S.actionBtn, color:"#ef4444", flexShrink:0 } }, h(IconTrash))
         ))
+  );
+}
+
+// ─── Settings ───
+function SettingsPanel({ prefs, setPrefs, onClose }) {
+  const [apiKey, setApiKey] = useState(prefs.googleApiKey);
+  const [saved, setSaved] = useState(false);
+
+  const toggle = (key) => {
+    const next = { ...prefs, [key]: !prefs[key] };
+    setPrefs(next); savePrefs(next);
+  };
+  const setTimeMode = (mode) => {
+    const next = { ...prefs, timeMode: mode };
+    setPrefs(next); savePrefs(next);
+  };
+  const saveKey = () => {
+    const next = { ...prefs, googleApiKey: apiKey.trim() };
+    setPrefs(next); savePrefs(next);
+    // Reset Google Maps loader state when key changes
+    gMapsLoaded = false; gMapsLoading = false;
+    setSaved(true); setTimeout(() => setSaved(false), 2000);
+  };
+
+  const lbl = (t) => h("label", { style:S.label }, t);
+  const toggleStyle = (on) => ({ width:48, height:28, borderRadius:14, border:"none", background: on?"#3b82f6":"#cbd5e1", position:"relative", cursor:"pointer", transition:"background 0.2s", flexShrink:0 });
+  const dotStyle = (on) => ({ position:"absolute", top:3, left: on?23:3, width:22, height:22, borderRadius:11, background:"#fff", transition:"left 0.2s", boxShadow:"0 1px 3px rgba(0,0,0,0.2)" });
+
+  const toggleBtn = (on, onClick) => h("button", { onClick, style: toggleStyle(on) }, h("span", { style: dotStyle(on) }));
+
+  return h("div", { style:{ animation:"slideUp 0.25s ease", paddingBottom:40 } },
+    h("div", { style:S.formHeader },
+      h("h2", { style:S.formTitle }, "Settings"),
+      h("button", { onClick:onClose, style:S.closeBtn }, h(IconX))
+    ),
+
+    // Time mode
+    h("div", { style:{ ...S.card, padding:"16px" } },
+      h("div", { style:{ fontWeight:600, color:"#1e293b", fontSize:15, marginBottom:12 } }, "Time Tracking Mode"),
+      h("div", { style:{ display:"flex", gap:8 } },
+        h("button", { onClick:()=>setTimeMode("startend"), style:{ flex:1, padding:"10px", border: prefs.timeMode==="startend"?"2px solid #3b82f6":"1.5px solid #e2e8f0", borderRadius:12, background: prefs.timeMode==="startend"?"#eff6ff":"#fff", cursor:"pointer", textAlign:"center" } },
+          h("div", { style:{ fontWeight:600, fontSize:14, color: prefs.timeMode==="startend"?"#2563eb":"#475569" } }, "Start / End"),
+          h("div", { style:{ fontSize:12, color:"#64748b", marginTop:2 } }, "e.g. 9:00 AM → 2:15 PM")
+        ),
+        h("button", { onClick:()=>setTimeMode("duration"), style:{ flex:1, padding:"10px", border: prefs.timeMode==="duration"?"2px solid #3b82f6":"1.5px solid #e2e8f0", borderRadius:12, background: prefs.timeMode==="duration"?"#eff6ff":"#fff", cursor:"pointer", textAlign:"center" } },
+          h("div", { style:{ fontWeight:600, fontSize:14, color: prefs.timeMode==="duration"?"#2563eb":"#475569" } }, "Total Duration"),
+          h("div", { style:{ fontSize:12, color:"#64748b", marginTop:2 } }, "e.g. 1:15 for 1h 15m")
+        )
+      )
+    ),
+
+    h("div", { style:{ height:12 } }),
+
+    // Google Maps
+    h("div", { style:{ ...S.card, padding:"16px" } },
+      h("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 } },
+        h("div", null,
+          h("div", { style:{ fontWeight:600, color:"#1e293b", fontSize:15 } }, "Google Maps"),
+          h("div", { style:{ fontSize:13, color:"#64748b", marginTop:2 } }, "Auto-calculate distance & duration")
+        ),
+        toggleBtn(prefs.useGoogleMaps, () => toggle("useGoogleMaps"))
+      ),
+      prefs.useGoogleMaps && h(React.Fragment, null,
+        h("div", { style:{ borderTop:"1px solid #f1f5f9", paddingTop:12 } },
+          lbl("Google Maps API Key"),
+          h("input", { value:apiKey, onChange:e=>setApiKey(e.target.value), placeholder:"AIza...", style:{ ...S.input, fontSize:14, fontFamily:"'JetBrains Mono', monospace" } }),
+          h("div", { style:{ display:"flex", gap:8, marginTop:8, alignItems:"center" } },
+            h("button", { onClick:saveKey, style:{ padding:"8px 16px", background:"linear-gradient(145deg,#3b82f6,#2563eb)", border:"none", borderRadius:10, color:"#fff", fontSize:13, fontWeight:600, cursor:"pointer" } }, "Save Key"),
+            saved && h("span", { style:{ fontSize:13, color:"#10b981", fontWeight:500 } }, "Saved!")
+          ),
+          h("p", { style:{ fontSize:12, color:"#94a3b8", marginTop:10, lineHeight:1.5 } },
+            "You'll need a Google Maps API key with Places, Directions, and Maps JavaScript API enabled. ",
+            h("a", { href:"https://console.cloud.google.com/apis/credentials", target:"_blank", style:{ color:"#3b82f6" } }, "Get one here"),
+            ". Your key is stored only on this device."
+          )
+        )
+      )
+    )
   );
 }
 
 // ─── Main App ───
 function App() {
-  const [data, setData] = useState(load);
-  const [view, setView] = useState("list");
+  const [data, setData] = useState(loadData);
+  const [prefs, setPrefs] = useState(loadPrefs);
+  const [view, setView] = useState("list"); // list | add | edit | addresses | settings
   const [editId, setEditId] = useState(null);
   const [filter, setFilter] = useState("month");
   const [expanded, setExpanded] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
 
-  useEffect(() => { save(data); }, [data]);
+  // Migrate old data format (startTime was ISO) to new format
+  useEffect(() => {
+    const oldKey = localStorage.getItem("milelog_v2");
+    if (oldKey && !localStorage.getItem(APP_KEY)) {
+      try {
+        const old = JSON.parse(oldKey);
+        if (old.trips) {
+          old.trips = old.trips.map(t => {
+            if (t.startTime && t.startTime.includes("T")) {
+              const d = new Date(t.startTime);
+              return { ...t, date: t.date || `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`, startTime: `${pad(d.getHours())}:${pad(d.getMinutes())}`, endTime: t.endTime && t.endTime.includes("T") ? (() => { const e = new Date(t.endTime); return `${pad(e.getHours())}:${pad(e.getMinutes())}`; })() : t.endTime || "" };
+            }
+            return t;
+          });
+        }
+        localStorage.setItem(APP_KEY, JSON.stringify(old));
+        setData(old);
+      } catch {}
+    }
+  }, []);
 
-  const addTrip = (t) => { setData(p => ({ ...p, trips: [{ ...t, id: uid() }, ...p.trips] })); setView("list"); };
-  const updateTrip = (t) => { setData(p => ({ ...p, trips: p.trips.map(x => x.id === t.id ? t : x) })); setView("list"); setEditId(null); };
-  const deleteTrip = (id) => { setData(p => ({ ...p, trips: p.trips.filter(x => x.id !== id) })); setConfirmDel(null); setExpanded(null); };
-  const addAddr = (a) => { setData(p => ({ ...p, addresses: [...p.addresses, { ...a, id: uid() }] })); };
-  const removeAddr = (id) => { setData(p => ({ ...p, addresses: p.addresses.filter(x => x.id !== id) })); };
+  useEffect(() => { saveData(data); }, [data]);
+
+  const addTrip = (t) => { setData(p => ({ ...p, trips:[{...t,id:uid()},...p.trips] })); setView("list"); };
+  const updateTrip = (t) => { setData(p => ({ ...p, trips:p.trips.map(x=>x.id===t.id?t:x) })); setView("list"); setEditId(null); };
+  const deleteTrip = (id) => { setData(p => ({ ...p, trips:p.trips.filter(x=>x.id!==id) })); setConfirmDel(null); setExpanded(null); };
+  const addAddr = (a) => { setData(p => ({ ...p, addresses:[...p.addresses,{...a,id:uid()}] })); };
+  const removeAddr = (id) => { setData(p => ({ ...p, addresses:p.addresses.filter(x=>x.id!==id) })); };
 
   const filtered = useMemo(() => {
     const now = new Date();
     return data.trips.filter(t => {
-      const d = new Date(t.date + "T00:00:00");
-      if (filter === "week") { const tw = weekNum(now), dw = weekNum(d); return tw.y === dw.y && tw.w === dw.w; }
-      if (filter === "month") return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-      if (filter === "year") return d.getFullYear() === now.getFullYear();
+      const d = new Date(t.date+"T00:00:00");
+      if (filter==="week") { const tw=weekNum(now),dw=weekNum(d); return tw.y===dw.y&&tw.w===dw.w; }
+      if (filter==="month") return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();
+      if (filter==="year") return d.getFullYear()===now.getFullYear();
       return true;
     });
   }, [data.trips, filter]);
 
-  const totalKm = filtered.reduce((s, t) => s + (parseFloat(t.distance) || 0), 0);
+  const totalKm = filtered.reduce((s,t) => s+(parseFloat(t.distance)||0), 0);
   const grouped = useMemo(() => {
     const g = {};
-    filtered.forEach(t => { const k = t.date; if (!g[k]) g[k] = []; g[k].push(t); });
-    return Object.entries(g).sort((a, b) => b[0].localeCompare(a[0]));
+    filtered.forEach(t => { const k=t.date; if(!g[k])g[k]=[]; g[k].push(t); });
+    return Object.entries(g).sort((a,b) => b[0].localeCompare(a[0]));
   }, [filtered]);
 
   const exportCSV = () => {
-    const q = (v) => '"' + String(v||"").replace(/"/g,'""') + '"';
-    const hdr = ["Date","Start Time","End Time","From","To","Distance (km)","Vehicle","Purpose","Notes"];
-    const rows = filtered.map(t => [q(fmtDate(t.date + "T00:00:00")), q(fmtTime(t.startTime)), q(fmtTime(t.endTime)), q(t.from), q(t.to), q(t.distance), q(t.vehicle), q(t.purpose), q(t.notes)]);
-    const csv = [hdr.join(","), ...rows.map(r => r.join(","))].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    const q = (v) => '"'+String(v||"").replace(/"/g,'""')+'"';
+    const isDur = prefs.timeMode === "duration";
+    const hdr = isDur
+      ? ["Date","Duration","From","To","Distance (km)","Vehicle","Purpose","Notes"]
+      : ["Date","Start Time","End Time","From","To","Distance (km)","Vehicle","Purpose","Notes"];
+    const rows = filtered.map(t => isDur
+      ? [q(fmtDate(t.date+"T00:00:00")), q(fmtDuration(t.duration)||""), q(t.from), q(t.to), q(t.distance), q(t.vehicle), q(t.purpose), q(t.notes)]
+      : [q(fmtDate(t.date+"T00:00:00")), q(fmtTime(t.startTime)), q(fmtTime(t.endTime)), q(t.from), q(t.to), q(t.distance), q(t.vehicle), q(t.purpose), q(t.notes)]
+    );
+    const csv = [hdr.join(","), ...rows.map(r=>r.join(","))].join("\n");
+    const blob = new Blob([csv], { type:"text/csv" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `milelog-${filter}-${new Date().toISOString().slice(0,10)}.csv`; a.click();
+    const a = document.createElement("a"); a.href=url; a.download=`milelog-${filter}-${new Date().toISOString().slice(0,10)}.csv`; a.click();
     URL.revokeObjectURL(url);
   };
 
-  return h("div", { style: { maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: "#f1f5f9", position: "relative" } },
+  const isDur = prefs.timeMode === "duration";
+
+  // Trip time display helper
+  const tripTimeDisplay = (trip) => {
+    if (isDur && trip.duration) return fmtDuration(trip.duration);
+    if (trip.startTime) return fmtTime(trip.startTime);
+    return "";
+  };
+
+  return h("div", { style:{ maxWidth:480, margin:"0 auto", minHeight:"100vh", background:"#f1f5f9", position:"relative" } },
     // Header
-    h("header", { style: { background: "linear-gradient(145deg, #0f172a 0%, #1e3a5f 100%)", padding: "20px 20px 16px", paddingTop: "max(20px, env(safe-area-inset-top, 20px))", color: "#fff", position: "sticky", top: 0, zIndex: 100 } },
-      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 } },
+    h("header", { style:{ background:"linear-gradient(145deg,#0f172a 0%,#1e3a5f 100%)", padding:"20px 20px 16px", paddingTop:"max(20px, env(safe-area-inset-top, 20px))", color:"#fff", position:"sticky", top:0, zIndex:100 } },
+      h("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:12 } },
         h("div", null,
-          h("h1", { style: { fontSize: 26, fontWeight: 700, letterSpacing: "-0.5px", margin: 0, lineHeight: 1 } }, "MileLog"),
-          h("p", { style: { fontSize: 13, fontWeight: 400, opacity: 0.6, marginTop: 2, letterSpacing: "0.5px", textTransform: "uppercase" } }, "Trip Tracker")
+          h("h1", { style:{ fontSize:26, fontWeight:700, letterSpacing:"-0.5px", margin:0, lineHeight:1 } }, "MileLog"),
+          h("p", { style:{ fontSize:13, fontWeight:400, opacity:0.6, marginTop:2, letterSpacing:"0.5px", textTransform:"uppercase" } }, "Trip Tracker")
         ),
-        h("button", { onClick: () => setView(view === "addresses" ? "list" : "addresses"), style: { background: "rgba(255,255,255,0.12)", border: "none", borderRadius: 10, padding: "8px 10px", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center" } }, h(IconBookmark))
+        h("div", { style:{ display:"flex", gap:6 } },
+          h("button", { onClick:()=>setView(view==="settings"?"list":"settings"), style:{ background:"rgba(255,255,255,0.12)", border:"none", borderRadius:10, padding:"8px 10px", color:"#fff", cursor:"pointer", display:"flex", alignItems:"center" } }, h(IconSettings)),
+          h("button", { onClick:()=>setView(view==="addresses"?"list":"addresses"), style:{ background:"rgba(255,255,255,0.12)", border:"none", borderRadius:10, padding:"8px 10px", color:"#fff", cursor:"pointer", display:"flex", alignItems:"center" } }, h(IconBookmark))
+        )
       ),
       view === "list" && h(React.Fragment, null,
-        h("div", { style: { display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(255,255,255,0.08)", borderRadius: 14, padding: "14px 20px", marginBottom: 14 } },
-          h("div", { style: { display: "flex", alignItems: "baseline", gap: 6, flex: 1, justifyContent: "center" } },
-            h("span", { style: { fontSize: 28, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", letterSpacing: "-1px" } }, totalKm.toFixed(1)),
-            h("span", { style: { fontSize: 14, opacity: 0.5, fontWeight: 500 } }, "km")
+        h("div", { style:{ display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(255,255,255,0.08)", borderRadius:14, padding:"14px 20px", marginBottom:14 } },
+          h("div", { style:{ display:"flex", alignItems:"baseline", gap:6, flex:1, justifyContent:"center" } },
+            h("span", { style:{ fontSize:28, fontWeight:700, fontFamily:"'JetBrains Mono', monospace", letterSpacing:"-1px" } }, totalKm.toFixed(1)),
+            h("span", { style:{ fontSize:14, opacity:0.5, fontWeight:500 } }, "km")
           ),
-          h("div", { style: { width: 1, height: 32, background: "rgba(255,255,255,0.15)", margin: "0 8px" } }),
-          h("div", { style: { display: "flex", alignItems: "baseline", gap: 6, flex: 1, justifyContent: "center" } },
-            h("span", { style: { fontSize: 28, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", letterSpacing: "-1px" } }, filtered.length),
-            h("span", { style: { fontSize: 14, opacity: 0.5, fontWeight: 500 } }, "trips")
+          h("div", { style:{ width:1, height:32, background:"rgba(255,255,255,0.15)", margin:"0 8px" } }),
+          h("div", { style:{ display:"flex", alignItems:"baseline", gap:6, flex:1, justifyContent:"center" } },
+            h("span", { style:{ fontSize:28, fontWeight:700, fontFamily:"'JetBrains Mono', monospace", letterSpacing:"-1px" } }, filtered.length),
+            h("span", { style:{ fontSize:14, opacity:0.5, fontWeight:500 } }, "trips")
           )
         ),
-        h("div", { style: { display: "flex", gap: 6 } },
+        h("div", { style:{ display:"flex", gap:6 } },
           ["week","month","year","all"].map(f =>
-            h("button", { key: f, onClick: () => setFilter(f), style: { flex: 1, padding: "8px 0", background: filter === f ? "#fff" : "rgba(255,255,255,0.08)", border: "none", borderRadius: 10, color: filter === f ? "#0f172a" : "rgba(255,255,255,0.5)", fontSize: 13, fontWeight: 600, cursor: "pointer", transition: "all 0.15s" } }, f === "all" ? "All" : f.charAt(0).toUpperCase() + f.slice(1))
+            h("button", { key:f, onClick:()=>setFilter(f), style:{ flex:1, padding:"8px 0", background:filter===f?"#fff":"rgba(255,255,255,0.08)", border:"none", borderRadius:10, color:filter===f?"#0f172a":"rgba(255,255,255,0.5)", fontSize:13, fontWeight:600, cursor:"pointer", transition:"all 0.15s" } }, f==="all"?"All":f.charAt(0).toUpperCase()+f.slice(1))
           )
         )
       )
     ),
 
-    // Main content
-    h("main", { style: { padding: "12px 16px 24px" } },
+    // Main
+    h("main", { style:{ padding:"12px 16px 24px" } },
       view === "list" && h(React.Fragment, null,
         grouped.length === 0
-          ? h("div", { style: { textAlign: "center", padding: "60px 20px", color: "#94a3b8", animation: "fadeIn 0.3s ease" } },
-              h(IconMap), h("p", { style: { margin: "12px 0 4px", fontWeight: 600, color: "#334155" } }, "No trips yet"),
-              h("p", { style: { color: "#94a3b8", fontSize: 14 } }, "Tap + to log your first trip")
+          ? h("div", { style:{ textAlign:"center", padding:"60px 20px", color:"#94a3b8", animation:"fadeIn 0.3s ease" } },
+              h(IconMap), h("p",{style:{margin:"12px 0 4px",fontWeight:600,color:"#334155"}},"No trips yet"),
+              h("p",{style:{color:"#94a3b8",fontSize:14}},"Tap + to log your first trip")
             )
-          : grouped.map(([date, trips]) =>
-              h("div", { key: date, style: { marginBottom: 16, animation: "slideUp 0.3s ease" } },
-                h("div", { style: { fontSize: 13, fontWeight: 600, color: "#64748b", padding: "8px 4px 6px", letterSpacing: "0.3px" } }, fmtDate(trips[0].date + "T00:00:00")),
+          : grouped.map(([date,trips]) =>
+              h("div", { key:date, style:{ marginBottom:16, animation:"slideUp 0.3s ease" } },
+                h("div", { style:{ fontSize:13, fontWeight:600, color:"#64748b", padding:"8px 4px 6px", letterSpacing:"0.3px" } }, fmtDate(trips[0].date+"T00:00:00")),
                 trips.map(trip =>
-                  h("div", { key: trip.id, style: { background: "#fff", borderRadius: 14, marginBottom: 8, overflow: "hidden", boxShadow: "0 1px 3px rgba(0,0,0,0.06)" } },
-                    h("div", { onClick: () => setExpanded(expanded === trip.id ? null : trip.id), style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", cursor: "pointer" } },
-                      h("div", { style: { display: "flex", gap: 12, alignItems: "center", flex: 1, minWidth: 0 } },
-                        h("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 } },
-                          h("span", { style: { width: 8, height: 8, borderRadius: "50%", background: "#3b82f6" } }),
-                          h("span", { style: { width: 2, height: 14, background: "#e2e8f0" } }),
-                          h("span", { style: { width: 8, height: 8, borderRadius: "50%", background: "#10b981" } })
+                  h("div", { key:trip.id, style:S.card },
+                    h("div", { onClick:()=>setExpanded(expanded===trip.id?null:trip.id), style:{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 16px", cursor:"pointer" } },
+                      h("div", { style:{ display:"flex", gap:12, alignItems:"center", flex:1, minWidth:0 } },
+                        h("div", { style:{ display:"flex", flexDirection:"column", alignItems:"center", gap:2, flexShrink:0 } },
+                          h("span", { style:{ width:8, height:8, borderRadius:"50%", background:"#3b82f6" } }),
+                          h("span", { style:{ width:2, height:14, background:"#e2e8f0" } }),
+                          h("span", { style:{ width:8, height:8, borderRadius:"50%", background:"#10b981" } })
                         ),
-                        h("div", { style: { minWidth: 0 } },
-                          h("div", { style: { fontSize: 14, fontWeight: 600, color: "#1e293b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 200 } }, trip.from || "—"),
-                          h("div", { style: { fontSize: 13, color: "#64748b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 200, marginTop: 2 } }, trip.to || "—")
+                        h("div", { style:{ minWidth:0 } },
+                          h("div", { style:{ fontSize:14, fontWeight:600, color:"#1e293b", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:200 } }, trip.from||"—"),
+                          h("div", { style:{ fontSize:13, color:"#64748b", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:200, marginTop:2 } }, trip.to||"—")
                         )
                       ),
-                      h("div", { style: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0, marginLeft: 12 } },
-                        h("div", { style: { fontSize: 15, fontWeight: 700, color: "#0f172a", fontFamily: "'JetBrains Mono', monospace" } }, trip.distance + " km"),
-                        h("div", { style: { fontSize: 12, color: "#94a3b8" } }, fmtTime(trip.startTime)),
-                        h(IconChev, { up: expanded === trip.id })
+                      h("div", { style:{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:2, flexShrink:0, marginLeft:12 } },
+                        h("div", { style:{ fontSize:15, fontWeight:700, color:"#0f172a", fontFamily:"'JetBrains Mono', monospace" } }, trip.distance+" km"),
+                        h("div", { style:{ fontSize:12, color:"#94a3b8" } }, tripTimeDisplay(trip)),
+                        h(IconChev, { up:expanded===trip.id })
                       )
                     ),
-                    expanded === trip.id && h("div", { style: { borderTop: "1px solid #f1f5f9", padding: "12px 16px", animation: "fadeIn 0.15s ease" } },
-                      h("div", { style: { display: "flex", flexDirection: "column", gap: 6, fontSize: 13, color: "#475569", marginBottom: 12 } },
-                        trip.endTime && h("span", null, "End: " + fmtTime(trip.endTime)),
-                        trip.vehicle && h("span", { style: { display: "inline-flex", alignItems: "center", gap: 4, background: "#f1f5f9", padding: "3px 10px", borderRadius: 8, width: "fit-content", fontWeight: 500 } }, h(IconCar), " " + trip.vehicle),
-                        trip.purpose && h("span", null, "Purpose: " + trip.purpose),
-                        trip.notes && h("span", null, "Notes: " + trip.notes)
+                    expanded === trip.id && h("div", { style:{ borderTop:"1px solid #f1f5f9", padding:"12px 16px", animation:"fadeIn 0.15s ease" } },
+                      h("div", { style:{ display:"flex", flexDirection:"column", gap:6, fontSize:13, color:"#475569", marginBottom:12 } },
+                        isDur && trip.duration && h("span", null, "Duration: "+fmtDuration(trip.duration)),
+                        !isDur && trip.endTime && h("span", null, "End: "+fmtTime(trip.endTime)),
+                        !isDur && trip.startTime && h("span", null, "Start: "+fmtTime(trip.startTime)),
+                        trip.vehicle && h("span", { style:{ display:"inline-flex", alignItems:"center", gap:4, background:"#f1f5f9", padding:"3px 10px", borderRadius:8, width:"fit-content", fontWeight:500 } }, h(IconCar), " "+trip.vehicle),
+                        trip.purpose && h("span", null, "Purpose: "+trip.purpose),
+                        trip.notes && h("span", null, "Notes: "+trip.notes)
                       ),
-                      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
-                        h("button", { onClick: () => { setEditId(trip.id); setView("edit"); }, style: { background: "none", border: "none", padding: "6px 10px", fontSize: 13, fontWeight: 600, color: "#3b82f6", cursor: "pointer", display: "flex", alignItems: "center", gap: 5, borderRadius: 8 } }, h(IconEdit), " Edit"),
-                        confirmDel === trip.id
-                          ? h("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
-                              h("span", { style: { fontSize: 13, color: "#ef4444" } }, "Delete?"),
-                              h("button", { onClick: () => deleteTrip(trip.id), style: { background: "none", border: "none", padding: "6px 10px", fontSize: 13, fontWeight: 600, color: "#ef4444", cursor: "pointer" } }, "Yes"),
-                              h("button", { onClick: () => setConfirmDel(null), style: { background: "none", border: "none", padding: "6px 10px", fontSize: 13, fontWeight: 600, color: "#3b82f6", cursor: "pointer" } }, "No")
+                      h("div", { style:{ display:"flex", justifyContent:"space-between", alignItems:"center" } },
+                        h("button", { onClick:()=>{setEditId(trip.id);setView("edit");}, style:{ ...S.actionBtn, color:"#3b82f6" } }, h(IconEdit)," Edit"),
+                        confirmDel===trip.id
+                          ? h("div", { style:{ display:"flex", gap:8, alignItems:"center" } },
+                              h("span",{style:{fontSize:13,color:"#ef4444"}},"Delete?"),
+                              h("button",{onClick:()=>deleteTrip(trip.id),style:{...S.actionBtn,color:"#ef4444"}},"Yes"),
+                              h("button",{onClick:()=>setConfirmDel(null),style:{...S.actionBtn,color:"#3b82f6"}},"No")
                             )
-                          : h("button", { onClick: () => setConfirmDel(trip.id), style: { background: "none", border: "none", padding: "6px 10px", fontSize: 13, fontWeight: 600, color: "#ef4444", cursor: "pointer", display: "flex", alignItems: "center", gap: 5, borderRadius: 8 } }, h(IconTrash), " Delete")
+                          : h("button", { onClick:()=>setConfirmDel(trip.id), style:{ ...S.actionBtn, color:"#ef4444" } }, h(IconTrash)," Delete")
                       )
                     )
                   )
                 )
               )
             ),
-        filtered.length > 0 && h("button", { onClick: exportCSV, style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", padding: "14px", background: "#fff", border: "2px dashed #cbd5e1", borderRadius: 14, color: "#475569", fontSize: 14, fontWeight: 600, cursor: "pointer", marginTop: 8 } }, h(IconDL), " Export " + (filter !== "all" ? "This " + filter.charAt(0).toUpperCase() + filter.slice(1) : "All") + " to CSV"),
-        h("div", { style: { height: 100 } })
+        filtered.length > 0 && h("button", { onClick:exportCSV, style:{ display:"flex", alignItems:"center", justifyContent:"center", gap:8, width:"100%", padding:"14px", background:"#fff", border:"2px dashed #cbd5e1", borderRadius:14, color:"#475569", fontSize:14, fontWeight:600, cursor:"pointer", marginTop:8 } }, h(IconDL), " Export "+(filter!=="all"?"This "+filter.charAt(0).toUpperCase()+filter.slice(1):"All")+" to CSV"),
+        h("div", { style:{ height:100 } })
       ),
 
-      view === "add" && h(TripForm, { addresses: data.addresses, onSave: addTrip, onCancel: () => setView("list") }),
-      view === "edit" && h(TripForm, { addresses: data.addresses, trip: data.trips.find(t => t.id === editId), onSave: updateTrip, onCancel: () => { setView("list"); setEditId(null); } }),
-      view === "addresses" && h(AddressManager, { addresses: data.addresses, onAdd: addAddr, onRemove: removeAddr, onClose: () => setView("list") })
+      view === "add" && h(TripForm, { addresses:data.addresses, onSave:addTrip, onCancel:()=>setView("list"), prefs }),
+      view === "edit" && h(TripForm, { addresses:data.addresses, trip:data.trips.find(t=>t.id===editId), onSave:updateTrip, onCancel:()=>{setView("list");setEditId(null);}, prefs }),
+      view === "addresses" && h(AddressManager, { addresses:data.addresses, onAdd:addAddr, onRemove:removeAddr, onClose:()=>setView("list") }),
+      view === "settings" && h(SettingsPanel, { prefs, setPrefs, onClose:()=>setView("list") })
     ),
 
     // FAB
-    view === "list" && h("button", { onClick: () => setView("add"), style: { position: "fixed", bottom: 28, right: "max(16px, calc(50% - 224px))", width: 56, height: 56, borderRadius: "50%", background: "linear-gradient(145deg, #3b82f6, #2563eb)", border: "none", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 20px rgba(37,99,235,0.4)", cursor: "pointer", zIndex: 200 } }, h(IconPlus, { s: 22 }))
+    view === "list" && h("button", { onClick:()=>setView("add"), style:{ position:"fixed", bottom:28, right:"max(16px, calc(50% - 224px))", width:56, height:56, borderRadius:"50%", background:"linear-gradient(145deg,#3b82f6,#2563eb)", border:"none", color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 4px 20px rgba(37,99,235,0.4)", cursor:"pointer", zIndex:200 } }, h(IconPlus, {s:22}))
   );
 }
 
