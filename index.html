@@ -220,8 +220,9 @@ function App() {
   }, [filtered]);
 
   const exportCSV = () => {
+    const q = (v) => '"' + String(v||"").replace(/"/g,'""') + '"';
     const hdr = ["Date","Start Time","End Time","From","To","Distance (km)","Vehicle","Purpose","Notes"];
-    const rows = filtered.map(t => [fmtDate(t.startTime), fmtTime(t.startTime), t.endTime ? fmtTime(t.endTime) : "", '"'+(t.from||"").replace(/"/g,'""')+'"', '"'+(t.to||"").replace(/"/g,'""')+'"', t.distance||"", t.vehicle||"", '"'+(t.purpose||"").replace(/"/g,'""')+'"', '"'+(t.notes||"").replace(/"/g,'""')+'"']);
+    const rows = filtered.map(t => [q(fmtDate(t.startTime)), q(fmtTime(t.startTime)), q(t.endTime ? fmtTime(t.endTime) : ""), q(t.from), q(t.to), q(t.distance), q(t.vehicle), q(t.purpose), q(t.notes)]);
     const csv = [hdr.join(","), ...rows.map(r => r.join(","))].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
